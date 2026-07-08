@@ -1,0 +1,19 @@
+# datos crudos de BA Data (pesados; URLs de descarga en el README)
+# — anclado a la raíz: web/public/data SÍ va al repo
+/data/
+
+# artefactos regenerables: base precomputada, gráficos, logs, corridas
+/output/
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+web/node_modules/
+web/dist/
+
+# local
+.claude/
+.DS_Store
