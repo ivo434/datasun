@@ -8,7 +8,22 @@ import { crearRampa, DATA, FECHAS, pisoDe, punto8, VISUAL_DEFAULT } from "./util
 
 const AFINANDO = import.meta.env.DEV &&
   new URLSearchParams(location.search).get("tune") === "1";
-const DURACION_DIA_MS = 15000;
+const DURACION_DIA_MS = 18000;
+const RAMPA_DIA_S = 1.5; // ease-in/out en los extremos del día
+
+// curva de tiempo del modo día: arranque suave (~1.5 s), crucero a velocidad
+// constante, frenada suave — perfil trapezoidal de velocidad, C1 continuo
+function easeDia(t) {
+  const a = RAMPA_DIA_S / (DURACION_DIA_MS / 1000);
+  const v = 1 / (1 - a); // velocidad de crucero que integra a 1
+  if (t <= 0) return 0;
+  if (t >= 1) return 1;
+  if (t < a) return (v * t * t) / (2 * a);
+  if (t > 1 - a) { const u = 1 - t; return 1 - (v * u * u) / (2 * a); }
+  return v * (t - a / 2);
+}
+
+const aHoras = (s) => { const [h, m] = s.split(":").map(Number); return h + m / 60; };
 
 function Dial({ az, dia }) {
   const C = 62, R = 47;
@@ -71,10 +86,9 @@ function LeyendaV({ p5, p95, rampa }) {
 
 // ¿hay sol directo en hhmm según los intervalos de esa cara/altura/fecha?
 function enSol(caraDoc, altura, fecha, hhmm) {
-  const aH = (s) => { const [h, m] = s.split(":").map(Number); return h + m / 60; };
-  const t = aH(hhmm);
+  const t = aHoras(hhmm);
   return (caraDoc?.horas?.[String(altura)]?.[fecha]?.iv || []).some((tramo) => {
-    const [a, b] = tramo.split("-").map(aH);
+    const [a, b] = tramo.split("-").map(aHoras);
     return t >= a && t <= b;
   });
 }
@@ -99,9 +113,8 @@ export default function App() {
   const [popover, setPopover] = useState(null);
   const [cfg, setCfg] = useState(VISUAL_DEFAULT);
   const [dia, setDia] = useState(null);          // "ver un día": {horaPrev, pausado}
-  const [flash, setFlash] = useState(false);
   const rampa = useMemo(() => crearRampa(cfg.paradas), [cfg.paradas]);
-  const soleadoRef = useRef(null);
+  const pRawRef = useRef(0); // progreso lineal (pre-easing), para pausar
 
   useEffect(() => {
     fetch(DATA("indice_direcciones.json")).then((r) => r.json()).then(setIndice);
@@ -175,12 +188,14 @@ export default function App() {
     const t0 = Date.now() - (dia.progresoMs || 0);
     let fin = false;
     const timer = setInterval(() => {
-      const p = Math.min(1, (Date.now() - t0) / DURACION_DIA_MS);
+      const pRaw = Math.min(1, (Date.now() - t0) / DURACION_DIA_MS);
+      pRawRef.current = pRaw;
+      const p = easeDia(pRaw);
       setHoraIdx(rango[0] + p * (rango[1] - rango[0]));
-      if (p >= 1 && !fin) {
+      if (pRaw >= 1 && !fin) {
         fin = true;
         clearInterval(timer);
-        setTimeout(() => terminarDia(), 600);
+        setTimeout(() => terminarDia(), 900);
       }
     }, 50);
     return () => clearInterval(timer);
@@ -188,6 +203,7 @@ export default function App() {
 
   function verUnDia() {
     if (!sel || dia) return;
+    pRawRef.current = 0;
     setDia({ horaPrev: horaIdx, pausado: false, marca: Date.now() });
     setHoraIdx(rango[0]);
   }
@@ -198,17 +214,38 @@ export default function App() {
     });
   }
 
-  // flash del edificio cuando el sol entra/sale de sus intervalos
-  const horaEntera = sol ? sol[fecha][Math.round(horaIdx)] : null;
+  // en modo día, cualquier tecla o click fuera de los controles también sale
   useEffect(() => {
-    if (!dia || !sel?.doc) { soleadoRef.current = null; return; }
-    const ahora = enSol(sel.doc.caras?.[cara], altura, fecha, horaEntera?.[0] || "00:00");
-    if (soleadoRef.current !== null && ahora !== soleadoRef.current) {
-      setFlash(true);
-      setTimeout(() => setFlash(false), 450);
-    }
-    soleadoRef.current = ahora;
-  }, [horaEntera?.[0], dia]);
+    if (!dia) return;
+    const tecla = () => terminarDia();
+    const click = (e) => {
+      if (!e.target.closest?.(".cine-hud .controles")) terminarDia();
+    };
+    window.addEventListener("keydown", tecla);
+    window.addEventListener("pointerdown", click);
+    return () => {
+      window.removeEventListener("keydown", tecla);
+      window.removeEventListener("pointerdown", click);
+    };
+  }, [!!dia]);
+
+  const horaEntera = sol ? sol[fecha][Math.round(horaIdx)] : null;
+  // ¿la parcela recibe sol directo ahora? (enciende el contorno en modo día)
+  const soleado = !!dia && !!sel?.doc &&
+    enSol(sel.doc.caras?.[cara], altura, fecha, horaEntera?.[0] || "00:00");
+
+  // intervalos de sol de la parcela como segmentos [left%, width%] de la
+  // barra de progreso del día
+  const tramosSol = useMemo(() => {
+    if (!dia || !sel?.doc || !sol || !rango) return [];
+    const iv = sel.doc.caras?.[cara]?.horas?.[String(altura)]?.[fecha]?.iv || [];
+    const h0 = aHoras(sol[fecha][rango[0]][0]);
+    const h1 = aHoras(sol[fecha][rango[1]][0]);
+    return iv.map((tramo) => {
+      const [a, b] = tramo.split("-").map(aHoras);
+      return [((a - h0) / (h1 - h0)) * 100, ((b - a) / (h1 - h0)) * 100];
+    });
+  }, [!!dia, sel, cara, altura, fecha, sol, rango]);
 
   const luzActual = horaEntera;
   const estacionActiva = FECHAS.find((f) => f.fecha === fecha)?.estacion;
@@ -234,7 +271,7 @@ export default function App() {
             avenidas={avenidas} suelo={suelo}
             hoverSmp={hover?.smp || null} onHover={setHover}
             onPick={(smp) => alElegir(smp, null, null)}
-            cine={!!dia} flash={flash} />
+            cine={!!dia} soleado={soleado} />
 
       <header className="cabecera">
         <h1>datasun</h1>
@@ -310,17 +347,31 @@ export default function App() {
         </div>
       )}
 
-      {dia && (
-        <div className="cine-controles">
-          <button onClick={() => setDia((d) => ({
-            ...d, pausado: !d.pausado,
-            progresoMs: rango
-              ? ((horaIdx - rango[0]) / (rango[1] - rango[0])) * DURACION_DIA_MS
-              : 0,
-          }))}>
-            {dia.pausado ? "▶ seguir" : "⏸ pausa"}
-          </button>
-          <button onClick={terminarDia}>✕ salir</button>
+      {dia && rango && (
+        <div className="cine-hud">
+          <div className="cine-hora" aria-live="off">
+            {luzActual?.[0]}
+            <span className="cine-estacion">{estacionActiva}</span>
+          </div>
+          <div className="cine-progreso" aria-hidden="true">
+            {tramosSol.map(([izq, ancho], i) => (
+              <span key={i} className="tramo-sol"
+                    style={{ left: `${izq}%`, width: `${ancho}%` }} />
+            ))}
+            <span className="cursor" style={{
+              width: `${(100 * (horaIdx - rango[0])) / (rango[1] - rango[0])}%`,
+            }} />
+          </div>
+          <div className="controles">
+            <button aria-label={dia.pausado ? "seguir" : "pausa"}
+                    onClick={() => setDia((d) => ({
+                      ...d, pausado: !d.pausado,
+                      progresoMs: pRawRef.current * DURACION_DIA_MS,
+                    }))}>
+              {dia.pausado ? "▶" : "⏸"}
+            </button>
+            <button aria-label="salir" onClick={terminarDia}>✕</button>
+          </div>
         </div>
       )}
 
@@ -335,7 +386,8 @@ export default function App() {
         </div>
       )}
 
-      {(sel || cargandoSmp) && !dia && (
+      {/* en modo día el panel queda montado y se desvanece por CSS */}
+      {(sel || cargandoSmp) && (
         <Panel sel={sel} comp={comp} cargando={cargandoSmp}
                altura={altura} setAltura={setAltura}
                cara={cara} setCara={setCara} fecha={fecha} estacion={estacionActiva}

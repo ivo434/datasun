@@ -65,9 +65,13 @@ const COMUNA_CENTRO = [-58.4405, -34.6175];
    Ancla: punto de suelo MÁS ALLÁ del borde del tejido en la dirección del
    azimut (borde de la comuna + 1.6 km, dentro de la franja de niebla); con
    elevación baja el disco besa esa línea, y sube 4.5 px/grado. */
-function SolOverlay({ vista, luz, cfg }) {
+function SolOverlay({ vista, luz, cfg, momento }) {
   if (!luz || luz[2] <= 0) return null;
   const [, az, elev] = luz;
+  // en modo día el sol respira: grande y tenue en el horizonte, chico y
+  // brillante en lo alto (momento: 0 = horizonte, 1 = mediodía)
+  const esc = momento == null ? 1 : 1.45 - 0.55 * momento;
+  const bri = momento == null ? 1 : 0.78 + 0.34 * momento;
   const vp = new WebMercatorViewport({
     ...vista, width: window.innerWidth, height: window.innerHeight,
   });
@@ -85,8 +89,10 @@ function SolOverlay({ vista, luz, cfg }) {
   return (
     <div className="sol-overlay" style={{
       left: x, top: y, opacity: detras ? 0 : 1,
-      "--disco": `${Math.round(cfg.discoTam * 0.62)}px`, "--disco-op": cfg.discoOp,
-      "--halo": `${cfg.haloTam}px`, "--halo-op": cfg.haloOp,
+      "--disco": `${Math.round(cfg.discoTam * 0.62 * esc)}px`,
+      "--disco-op": Math.min(1, cfg.discoOp * bri),
+      "--halo": `${Math.round(cfg.haloTam * esc)}px`,
+      "--halo-op": Math.min(1, cfg.haloOp * bri),
     }}>
       <div className="resplandor" />
       <div className="halo" />
@@ -114,7 +120,7 @@ function VeloBorde({ vista }) {
 export default function Mapa({ smpSel, centro, compSmp, compCentro,
                                luz, solDia, calor, rampa, cfg,
                                avenidas, suelo, hoverSmp, onHover, onPick,
-                               cine = false, flash = false }) {
+                               cine = false, soleado = false }) {
   const [vista, setVista] = useState(REDUCIDO || DEBIL ? VISTA_OPERATIVA : VISTA_INTRO);
   const [tejido, setTejido] = useState(null);
   const introHecha = useRef(REDUCIDO || DEBIL);
@@ -200,8 +206,20 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
     }
   }, [cine]);
 
+  // momento del día para el modo cine: 0 = sol en el horizonte, 1 = cénit.
+  // Se normaliza por la elevación máxima de la estación (capada a 35°) para
+  // que el invierno también recorra la curva completa.
+  const momento = useMemo(() => {
+    if (!cine || !luz || !solDia) return null;
+    const maxElev = Math.min(35, Math.max(...solDia.map((s) => s[2])));
+    return Math.max(0, Math.min(1, luz[2] / maxElev));
+  }, [cine, luz, solDia]);
+
   // MÉTODO EMISIVO: la ambiente alta hace que el color de dato se lea a plena
   // luminancia; la direccional queda como matiz cálido de las caras al sol.
+  // En modo día la atmósfera acompaña la hora: direccional cálido-rojiza y
+  // más floja cerca del horizonte, neutra y más intensa al mediodía; la
+  // ambiente cae apenas en los extremos (sutil: el look sigue emisivo).
   const efectos = useMemo(() => {
     if (!luz) return [];
     const [, az, elev] = luz;
@@ -211,20 +229,41 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
       Math.cos(rad(az)) * Math.cos(rad(elev)),
       -Math.max(Math.sin(rad(elev)), 0.03),
     ];
+    const m = momento;
+    const CALIDO = [255, 157, 92]; // #ff9d5c: amanecer/atardecer
+    const neutro = hexRgb(cfg.solColor);
     const solar = new DirectionalLight({
-      color: hexRgb(cfg.solColor),
-      intensity: dia ? cfg.solIntensidad : 0.0,
+      color: m == null ? neutro
+        : CALIDO.map((c, i) => Math.round(c + (neutro[i] - c) * m)),
+      intensity: !dia ? 0.0
+        : cfg.solIntensidad * (m == null ? 1 : 0.78 + 0.45 * m),
       direction: dir,
       _shadow: CON_SOMBRAS,
     });
     const ambiente = new AmbientLight({
       color: [235, 240, 252],
-      intensity: dia ? cfg.ambiente : cfg.ambiente * 0.55,
+      intensity: !dia ? cfg.ambiente * 0.55
+        : cfg.ambiente * (m == null ? 1 : 0.82 + 0.18 * m),
     });
     const ef = new LightingEffect({ ambiente, solar });
     if (CON_SOMBRAS) ef.shadowColor = [0, 0, 0, 0.45];
     return [ef];
-  }, [luz, cfg.ambiente, cfg.solIntensidad, cfg.solColor]);
+  }, [luz, momento, cfg.ambiente, cfg.solIntensidad, cfg.solColor]);
+
+  // contorno de la parcela en modo día: anillos del techo de cada prisma del
+  // SMP — el fill conserva el color de heatmap y la selección se lee por línea
+  const contorno = useMemo(() => {
+    if (!cine || !smpSel || !tejido) return null;
+    const anillos = [];
+    for (const f of tejido.features) {
+      if (f.properties.smp !== smpSel) continue;
+      const z = (f.properties.altura || 3) + 1.5;
+      const polys = f.geometry.type === "Polygon"
+        ? [f.geometry.coordinates] : f.geometry.coordinates;
+      polys.forEach((p) => anillos.push(p[0].map(([x, y]) => [x, y, z])));
+    }
+    return anillos.length ? anillos : null;
+  }, [cine, smpSel, tejido]);
 
   const lonC = Math.round(vista.longitude * 400) / 400;
   const latC = Math.round(vista.latitude * 400) / 400;
@@ -268,13 +307,17 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
   const capas = useMemo(() => {
     const colorDe = (f) => {
       const smp = f.properties.smp;
-      if (smp === smpSel) return flash ? [255, 255, 255, 255] : [255, 232, 178, 255];
-      if (smp === compSmp) return [168, 205, 255, 255]; // segundo tono: frío
       const v = calor ? calor.valores.get(smp) : undefined;
       const base = (v === undefined || v < 0)
         ? GRIS_SIN_DATO
         : rampa((v - calor.p5) / (calor.p95 - calor.p5));
-      if (!cine && smp === hoverSmp) {
+      // modo día: la escena es la protagonista — todo el mundo (incluida la
+      // selección) con su color de heatmap respondiendo a la luz; la parcela
+      // se distingue por contorno, no por fill
+      if (cine) return [base[0], base[1], base[2], 255];
+      if (smp === smpSel) return [255, 232, 178, 255];
+      if (smp === compSmp) return [168, 205, 255, 255]; // segundo tono: frío
+      if (smp === hoverSmp) {
         return [Math.min(255, base[0] + 55), Math.min(255, base[1] + 55),
                 Math.min(255, base[2] + 55), 255];
       }
@@ -324,12 +367,39 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         extruded: true,
         getElevation: (f) => f.properties.altura,
         getFillColor: colorDe,
-        updateTriggers: { getFillColor: [smpSel, hoverSmp, calor, rampa] },
+        updateTriggers: { getFillColor: [smpSel, hoverSmp, calor, rampa, cine] },
         material: { ambient: 0.62, diffuse: 0.5, shininess: 22, specularColor: [10, 10, 10] },
         pickable: true,
         onHover: (info) => onHover(info.object
           ? { smp: info.object.properties.smp, x: info.x, y: info.y } : null),
         onClick: (info) => info.object && onPick(info.object.properties.smp),
+      }),
+      // ── contorno cine: sub-trazo oscuro (legible sobre cualquier color de
+      // rampa) + línea ámbar; el glow se enciende mientras hay sol directo y
+      // decae al salir del intervalo — cuenta la historia sin tapar el color
+      contorno && new PathLayer({
+        id: "contorno-glow", data: contorno, getPath: (d) => d,
+        widthUnits: "pixels", jointRounded: true, capRounded: true,
+        getWidth: soleado ? 13 : 0,
+        getColor: soleado ? [255, 196, 64, 110] : [255, 196, 64, 0],
+        parameters: { depthCompare: "always" },
+        transitions: { getWidth: 500, getColor: 500 },
+        updateTriggers: { getWidth: [soleado], getColor: [soleado] },
+      }),
+      contorno && new PathLayer({
+        id: "contorno-sombra", data: contorno, getPath: (d) => d,
+        widthUnits: "pixels", jointRounded: true, capRounded: true,
+        getWidth: 4, getColor: [8, 11, 17, 190],
+        parameters: { depthCompare: "always" },
+      }),
+      contorno && new PathLayer({
+        id: "contorno", data: contorno, getPath: (d) => d,
+        widthUnits: "pixels", jointRounded: true, capRounded: true,
+        getWidth: soleado ? 2.4 : 1.6,
+        getColor: soleado ? [255, 222, 140, 255] : [255, 196, 64, 225],
+        parameters: { depthCompare: "always" },
+        transitions: { getWidth: 500, getColor: 500 },
+        updateTriggers: { getWidth: [soleado], getColor: [soleado] },
       }),
       arco && new ScatterplotLayer({
         id: "arco-sol", data: arco.puntos, getPosition: (d) => d,
@@ -393,7 +463,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
-  }, [tejido, smpSel, compSmp, flash, cine, hoverSmp, calor, rampa, arco, avenidas,
+  }, [tejido, smpSel, compSmp, soleado, contorno, cine, hoverSmp, calor, rampa, arco, avenidas,
       avPrincipales, sueloZ, cfg.calleLum, cfg.parqueLum, cfg.viaLum,
       centro, compCentro, vista.zoom < 14.8, vista.zoom < 14.3, vista.zoom < 16,
       vista.zoom > 15.2]);
@@ -415,9 +485,29 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
     };
   }, [cfg.nieblaDensidad, cfg.nieblaTejido, cfg.nieblaAlcance]);
 
+  // cielo del modo día: keyframes amanecer/atardecer (horizonte cálido) ↔
+  // mediodía (azul más claro arriba) interpolados por `momento`; con el sol
+  // a <3° (primeros/últimos minutos) el horizonte cae hacia lo oscuro
+  const cieloCine = useMemo(() => {
+    if (momento == null) return null;
+    const lerp = (a, b, t) => a.map((c, i) => Math.round(c + (b[i] - c) * t));
+    const css = (c) => `rgb(${c.join(",")})`;
+    const t = momento;
+    const osc = Math.min(1, Math.max(0, luz[2] / 3));
+    const alto = lerp([9, 12, 26], [24, 42, 72], t);
+    const medio = lerp([28, 24, 42], [17, 28, 48], t);
+    const horiz = lerp([116, 58, 32], [14, 21, 34], t)
+      .map((c) => Math.round(c * (0.35 + 0.65 * osc)));
+    return {
+      background: `linear-gradient(180deg, ${css(alto)} 0%, ${css(medio)} 36%,
+        ${css(horiz)} 60%, #0a0e14 78%)`,
+    };
+  }, [momento, luz?.[2]]);
+
   return (
     <div className="mapa">
       <div className="cielo" style={{ opacity: cfg.cieloIntensidad }} />
+      <div className="cielo-cine" style={{ ...(cieloCine || {}), opacity: cieloCine ? 1 : 0 }} />
       <DeckGL
         ref={deckRef}
         viewState={vista}
@@ -429,7 +519,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         getCursor={({ isDragging }) =>
           isDragging ? "grabbing" : hoverSmp ? "pointer" : "grab"}
       />
-      <SolOverlay vista={vista} luz={luz} cfg={cfg} />
+      <SolOverlay vista={vista} luz={luz} cfg={cfg} momento={momento} />
       <VeloBorde vista={vista} />
       <div className="niebla" style={nieblaEstilo} />
       <div className="vineta" style={{ opacity: cfg.vinetaOp }} />

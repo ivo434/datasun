@@ -58,6 +58,12 @@ body {
   background: linear-gradient(180deg,
     #0b1226 0%, #0a101f 22%, #0a0e17 40%, #0a0e14 60%);
 }
+/* cielo del modo día: mismo plano que .cielo, cross-fade por opacidad; el
+   gradiente lo interpola Mapa.jsx con la hora */
+.cielo-cine {
+  position: absolute; inset: 0; z-index: 0; pointer-events: none;
+  transition: opacity 1.2s ease;
+}
 
 /* sol como overlay DEBAJO del canvas (la ciudad lo ocluye): blend screen
    contra el gradiente del cielo; z entre .cielo (0) y el canvas de deck */
@@ -380,27 +386,59 @@ body {
 .columna-comp .gana { color: var(--ambar); margin-left: 5px; font-size: 9px; }
 .cerrar.chica { top: 6px; right: 6px; width: 22px; height: 22px; font-size: 12px; }
 
-/* ── "ver un día": controles atenuados + pausa/salir ─────────────────── */
-.app.cine .instrumento, .app.cine .controles-movil, .app.cine .cabecera,
-.app.cine .leyenda-v, .app.cine .boton-esquina {
-  opacity: 0.35; pointer-events: none; transition: opacity 0.4s;
+/* ── "ver un día": HUD cinematográfico ───────────────────────────────
+   Todo el chrome se desvanece; quedan hora grande, barra de progreso del
+   día (2 px, con los intervalos de sol de la parcela) y controles fantasma. */
+.cabecera, .instrumento, .controles-movil, .leyenda-v, .boton-esquina,
+.panel, .popover, .tooltip {
+  transition: opacity 0.6s ease;
 }
-.app.cine .instrumento .pista-hora, .app.cine .instrumento .hora-flotante {
-  opacity: 1; /* el readout de hora sigue corriendo visible */
+.app.cine .cabecera, .app.cine .instrumento, .app.cine .controles-movil,
+.app.cine .leyenda-v, .app.cine .boton-esquina, .app.cine .panel,
+.app.cine .popover {
+  opacity: 0; pointer-events: none;
 }
-.cine-controles {
-  position: absolute; left: 50%; bottom: 190px; transform: translateX(-50%);
-  z-index: 26; display: flex; gap: 10px;
+
+.cine-hud {
+  position: absolute; inset: 0; z-index: 26; pointer-events: none;
+  animation: hud-entra 0.9s ease 0.25s backwards;
 }
-.cine-controles button {
-  padding: 11px 22px; cursor: pointer; font-family: inherit;
-  font-size: 12px; letter-spacing: 0.16em; text-transform: uppercase;
-  background: var(--vidrio); color: var(--texto);
-  border: 1px solid var(--vidrio-borde); border-radius: 12px;
-  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4); min-height: 44px;
+@keyframes hud-entra { from { opacity: 0; } }
+.cine-hora {
+  position: absolute; left: 50%; bottom: 46px; transform: translateX(-50%);
+  font-size: 42px; font-weight: 100; letter-spacing: 0.2em;
+  font-variant-numeric: tabular-nums; text-align: center;
+  color: rgba(244, 240, 231, 0.95);
+  text-shadow: 0 2px 24px rgba(0, 0, 0, 0.6);
 }
-.cine-controles button:hover { border-color: rgba(255, 196, 64, 0.5); }
+.cine-estacion {
+  display: block; margin-top: 2px;
+  font-size: 10px; font-weight: 500; letter-spacing: 0.5em;
+  text-transform: uppercase; color: rgba(200, 206, 218, 0.65);
+}
+.cine-progreso {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+  background: rgba(255, 255, 255, 0.09);
+}
+.cine-progreso .cursor {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  background: rgba(255, 255, 255, 0.42);
+}
+.cine-progreso .tramo-sol {
+  position: absolute; top: 0; bottom: 0;
+  background: rgba(255, 196, 64, 0.55);
+}
+.cine-hud .controles {
+  position: absolute; top: 14px; right: 14px; display: flex; gap: 2px;
+  pointer-events: auto;
+}
+.cine-hud .controles button {
+  width: 44px; height: 44px; padding: 0; cursor: pointer;
+  background: none; border: none; font-family: inherit; font-size: 17px;
+  color: var(--texto); opacity: 0.4; transition: opacity 0.25s;
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.7);
+}
+.cine-hud .controles button:hover { opacity: 1; }
 
 .mensaje .enlace {
   margin-left: 8px; background: none; border: none; cursor: pointer;
@@ -506,7 +544,7 @@ body {
   .panel {
     top: auto; left: 0; right: 0; bottom: 0; width: 100%; max-width: none;
     height: 52vh; border-radius: 18px 18px 0 0; padding-top: 10px;
-    transition: height 0.25s ease;
+    transition: height 0.25s ease, opacity 0.6s ease;
   }
   /* con la sheet abierta, los controles flotan justo encima (referencia móvil) */
   .app.con-panel .controles-movil { bottom: calc(52vh + 10px); }
@@ -524,8 +562,9 @@ body {
   /* comparación en móvil: columnas apiladas, no lado a lado */
   .panel.comparar { width: 100%; }
   .columnas { grid-template-columns: 1fr; }
-  .cine-controles { bottom: 120px; }
-  .cine-controles button { padding: 13px 26px; }
+  /* modo día en móvil: hora un poco más chica, mismos touch targets */
+  .cine-hora { font-size: 30px; bottom: 36px; letter-spacing: 0.16em; }
+  .cine-hud .controles { top: 8px; right: 6px; }
 }
 @media (min-width: 781px) {
   .panel .agarre { display: none; }
