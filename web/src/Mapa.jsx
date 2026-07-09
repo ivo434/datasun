@@ -111,8 +111,10 @@ function VeloBorde({ vista }) {
   );
 }
 
-export default function Mapa({ smpSel, centro, luz, solDia, calor, rampa, cfg,
-                               avenidas, suelo, hoverSmp, onHover, onPick }) {
+export default function Mapa({ smpSel, centro, compSmp, compCentro,
+                               luz, solDia, calor, rampa, cfg,
+                               avenidas, suelo, hoverSmp, onHover, onPick,
+                               cine = false, flash = false }) {
   const [vista, setVista] = useState(REDUCIDO || DEBIL ? VISTA_OPERATIVA : VISTA_INTRO);
   const [tejido, setTejido] = useState(null);
   const introHecha = useRef(REDUCIDO || DEBIL);
@@ -164,6 +166,39 @@ export default function Mapa({ smpSel, centro, luz, solDia, calor, rampa, cfg,
       }));
     }
   }, [centro?.[0], centro?.[1]]);
+
+  // "ver un día": la cámara baja y se acerca a la parcela; al salir, vuelve.
+  // Con prefers-reduced-motion no se mueve la cámara (solo corre el slider).
+  const vistaPrevia = useRef(null);
+  useEffect(() => {
+    if (REDUCIDO) return;
+    if (cine) {
+      setVista((v) => {
+        // no pisar una vista previa pendiente (re-entrada durante la vuelta)
+        if (!vistaPrevia.current) {
+          vistaPrevia.current = { longitude: v.longitude, latitude: v.latitude,
+                                  zoom: v.zoom, pitch: Math.min(v.pitch, 60),
+                                  bearing: v.bearing };
+        }
+        return {
+          ...v,
+          longitude: centro?.[0] ?? v.longitude,
+          latitude: centro?.[1] ?? v.latitude,
+          zoom: Math.min(v.zoom + 1, 17.6), pitch: 65,
+          transitionDuration: 1800,
+          transitionInterpolator: new FlyToInterpolator({ curve: 1.2 }),
+        };
+      });
+    } else if (vistaPrevia.current) {
+      const prev = vistaPrevia.current;
+      vistaPrevia.current = null;
+      setVista((v) => ({
+        ...v, ...prev,
+        transitionDuration: 1200,
+        transitionInterpolator: new FlyToInterpolator({ curve: 1.2 }),
+      }));
+    }
+  }, [cine]);
 
   // MÉTODO EMISIVO: la ambiente alta hace que el color de dato se lea a plena
   // luminancia; la direccional queda como matiz cálido de las caras al sol.
@@ -233,18 +268,24 @@ export default function Mapa({ smpSel, centro, luz, solDia, calor, rampa, cfg,
   const capas = useMemo(() => {
     const colorDe = (f) => {
       const smp = f.properties.smp;
-      if (smp === smpSel) return [255, 232, 178, 255];
+      if (smp === smpSel) return flash ? [255, 255, 255, 255] : [255, 232, 178, 255];
+      if (smp === compSmp) return [168, 205, 255, 255]; // segundo tono: frío
       const v = calor ? calor.valores.get(smp) : undefined;
       const base = (v === undefined || v < 0)
         ? GRIS_SIN_DATO
         : rampa((v - calor.p5) / (calor.p95 - calor.p5));
-      if (smp === hoverSmp) {
+      if (!cine && smp === hoverSmp) {
         return [Math.min(255, base[0] + 55), Math.min(255, base[1] + 55),
                 Math.min(255, base[2] + 55), 255];
       }
       if (smpSel) return [base[0] * 0.5, base[1] * 0.5, base[2] * 0.5, 235];
       return [base[0], base[1], base[2], 255];
     };
+    // pins: seleccionada (cálido) y comparada (frío)
+    const pins = [
+      smpSel && centro && { p: centro, c: [255, 244, 220, 235] },
+      compSmp && compCentro && { p: compCentro, c: [168, 205, 255, 235] },
+    ].filter(Boolean);
     const zoomBajo = vista.zoom < 14.8;
     return [
       new SolidPolygonLayer({
@@ -337,24 +378,24 @@ export default function Mapa({ smpSel, centro, luz, solDia, calor, rampa, cfg,
         updateTriggers: { getSize: [vista.zoom < 14.3], getColor: [vista.zoom < 14.3] },
         visible: vista.zoom < 16,
       }),
-      smpSel && centro && new LineLayer({
-        id: "pin-linea", data: [centro],
-        getSourcePosition: (d) => [d[0], d[1], 6],
-        getTargetPosition: (d) => [d[0], d[1], 165],
-        getColor: [255, 244, 220, 235], getWidth: 1.4,
+      pins.length && new LineLayer({
+        id: "pin-linea", data: pins,
+        getSourcePosition: (d) => [d.p[0], d.p[1], 6],
+        getTargetPosition: (d) => [d.p[0], d.p[1], 165],
+        getColor: (d) => d.c, getWidth: 1.4,
         parameters: { depthCompare: "always" },
       }),
-      smpSel && centro && new ScatterplotLayer({
-        id: "pin-punto", data: [centro],
-        getPosition: (d) => [d[0], d[1], 168],
+      pins.length && new ScatterplotLayer({
+        id: "pin-punto", data: pins,
+        getPosition: (d) => [d.p[0], d.p[1], 168],
         radiusUnits: "pixels", getRadius: 4,
-        getFillColor: [255, 248, 232, 255],
+        getFillColor: (d) => d.c,
         parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
-  }, [tejido, smpSel, hoverSmp, calor, rampa, arco, avenidas, avPrincipales,
-      sueloZ, cfg.calleLum, cfg.parqueLum, cfg.viaLum,
-      centro, vista.zoom < 14.8, vista.zoom < 14.3, vista.zoom < 16,
+  }, [tejido, smpSel, compSmp, flash, cine, hoverSmp, calor, rampa, arco, avenidas,
+      avPrincipales, sueloZ, cfg.calleLum, cfg.parqueLum, cfg.viaLum,
+      centro, compCentro, vista.zoom < 14.8, vista.zoom < 14.3, vista.zoom < 16,
       vista.zoom > 15.2]);
 
   // Niebla en DOS niveles: la densa (nieblaDensidad) se concentra en la banda
@@ -381,7 +422,7 @@ export default function Mapa({ smpSel, centro, luz, solDia, calor, rampa, cfg,
         ref={deckRef}
         viewState={vista}
         onViewStateChange={(e) => setVista(e.viewState)}
-        controller={{ touchRotate: true }}
+        controller={{ touchRotate: true, maxPitch: 66 }}
         layers={capas}
         effects={efectos}
         onError={(e) => console.error("deck error:", e)}
