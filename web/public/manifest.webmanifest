@@ -1,0 +1,13 @@
+{
+  "name": "datasun — sol directo en la Comuna 6",
+  "short_name": "datasun",
+  "description": "Cuántas horas de sol directo recibe cada edificio de la Comuna 6, por cara y por piso.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0e14",
+  "theme_color": "#0a0e14",
+  "icons": [
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}

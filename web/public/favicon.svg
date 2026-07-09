@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- datasun: disco solar con halo asomando sobre el horizonte -->
+  <defs>
+    <linearGradient id="cielo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#131b3a"/>
+      <stop offset="1" stop-color="#0a0e14"/>
+    </linearGradient>
+    <radialGradient id="halo" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffb843" stop-opacity="0.5"/>
+      <stop offset="0.55" stop-color="#ff9e43" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#ff9e43" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="64" height="64" fill="url(#cielo)"/>
+  <circle cx="32" cy="25" r="23" fill="url(#halo)"/>
+  <circle cx="32" cy="25" r="10.5" fill="#ffb843"/>
+  <!-- silueta mínima a contraluz, sin tocar el disco -->
+  <rect x="16" y="40" width="8" height="7" fill="#0b0f18"/>
+  <rect x="28" y="38" width="8" height="9" fill="#0b0f18"/>
+  <rect x="40" y="42" width="7" height="5" fill="#0b0f18"/>
+  <!-- línea de horizonte -->
+  <rect x="6" y="46" width="52" height="2.5" rx="1.25" fill="#4d5a94"/>
+</svg>
