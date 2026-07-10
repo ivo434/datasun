@@ -1,9 +1,12 @@
 # datos crudos de BA Data (pesados; URLs de descarga en el README)
-# — anclado a la raíz: web/public/data SÍ va al repo
 /data/
 
 # artefactos regenerables: base precomputada, gráficos, logs, corridas
 /output/
+
+# datos exportados para el frontend: ~2 GB regenerables por script
+# (scripts/export_frontend.py); al deploy van desde el disco local
+/web/public/data/
 
 # python
 .venv/

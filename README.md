@@ -3,9 +3,9 @@
 Análisis de asoleamiento para Buenos Aires. Dada una dirección, calcula
 cuántas horas de sol directo recibe cada cara de un edificio (frente y
 contrafrente) a distintas alturas, considerando la sombra del tejido urbano
-real. Incluye un visor web 3D con el mapa de calor solar de toda la comuna.
+real. Incluye un visor web 3D con el mapa de calor solar de la ciudad completa.
 
-Piloto: Comuna 6 (Caballito).
+Cobertura: las 15 comunas de CABA (318.046 parcelas).
 
 ## Cómo funciona
 
@@ -16,9 +16,10 @@ muestrea el día cada 10 minutos y se traza un rayo hacia la posición solar
 sombra. El observador se posiciona sobre la fachada real de la construcción
 principal de la parcela, con la orientación derivada del eje de la calle.
 
-Los resultados se precomputan para toda la comuna (dos caras × alturas de
+Los resultados se precomputan comuna por comuna (dos caras × alturas de
 3 a 30 m × cuatro fechas estacionales, con los intervalos horarios de sol) y
-se sirven como archivos estáticos: el visor no necesita backend.
+se sirven como archivos estáticos particionados por comuna: el visor no
+necesita backend y carga cada zona recién cuando el mapa la mira.
 
 ## Correr el visor
 

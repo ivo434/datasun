@@ -1438,8 +1438,10 @@ if __name__ == "__main__":
         barrido(CONFIG["direccion"], radio=500.0, h_obs=6.0)
     elif cmd == "comuna":
         test_azimut()
-        precomputar_comuna(nro=6)
+        nro = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+        precomputar_comuna(nro=nro, db_path=f"output/comuna{nro}.sqlite")
     elif cmd == "geojson":
-        exportar_tejido_geojson(nro=6)
+        nro = int(sys.argv[2]) if len(sys.argv) > 2 else 6
+        exportar_tejido_geojson(nro=nro)
     else:
         sys.exit(f"comando desconocido: {cmd} (usar: ventana | curva | barrido | comuna | geojson)")

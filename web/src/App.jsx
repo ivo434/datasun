@@ -4,11 +4,16 @@ import Buscador from "./Buscador.jsx";
 import { ICONO_ESTACION } from "./Iconos.jsx";
 import Mapa from "./Mapa.jsx";
 import Panel from "./Panel.jsx";
-import { crearRampa, DATA, FECHAS, pisoDe, punto8, VISUAL_DEFAULT } from "./util.js";
+import { cargarDoc, comunasEnCaja, crearRampa, cuadrantesEnCaja, DATA, FECHAS,
+         pisoDe, punto8, VISUAL_DEFAULT } from "./util.js";
 
 const AFINANDO = import.meta.env.DEV &&
   new URLSearchParams(location.search).get("tune") === "1";
 const DURACION_DIA_MS = 18000;
+// por debajo de este zoom manda el agregado por manzana; por encima se traen
+// heatmap + tiles de tejido de las comunas del viewport (ver DECISIONES)
+export const UMBRAL_DETALLE = 13.4;
+const MAX_TILES = matchMedia("(max-width: 780px)").matches ? 6 : 12;
 const RAMPA_DIA_S = 1.5; // ease-in/out en los extremos del día
 
 // curva de tiempo del modo día: arranque suave (~1.5 s), crucero a velocidad
@@ -94,9 +99,13 @@ function enSol(caraDoc, altura, fecha, hhmm) {
 }
 
 export default function App() {
-  const [indice, setIndice] = useState(null);
+  const [meta, setMeta] = useState(null);        // comunas.json: bboxes, secciones, p5/p95
+  const [ciudad, setCiudad] = useState(null);    // agregado por manzana (vista ciudad)
+  const [barrios, setBarrios] = useState(null);
   const [sol, setSol] = useState(null);
-  const [heatmap, setHeatmap] = useState(null);
+  const [heatmaps, setHeatmaps] = useState({});  // nro → heatmap de la comuna
+  const [tejidos, setTejidos] = useState({});    // "N-qQ" → geojson del tile
+  const [caja, setCaja] = useState(null);        // {caja:[w,s,e,n], zoom} del viewport
   const [avenidas, setAvenidas] = useState(null);
   const [suelo, setSuelo] = useState(null);
   const [sel, setSel] = useState(null);
@@ -115,19 +124,57 @@ export default function App() {
   const [dia, setDia] = useState(null);          // "ver un día": {horaPrev, pausado}
   const rampa = useMemo(() => crearRampa(cfg.paradas), [cfg.paradas]);
   const pRawRef = useRef(0); // progreso lineal (pre-easing), para pausar
+  const packCache = useRef(new Map());     // shard → promesa del pack
+  const pidiendo = useRef(new Set());      // heatmaps/tiles en vuelo
+  const ordenTiles = useRef([]);           // LRU de tiles cargados
 
   useEffect(() => {
-    fetch(DATA("indice_direcciones.json")).then((r) => r.json()).then(setIndice);
+    // primera pintura: metadatos + agregado ciudad + sol + barrios; el resto
+    // (susurro del suelo, etiquetas de avenidas) llega detrás sin bloquear
+    fetch(DATA("comunas.json")).then((r) => r.json()).then(setMeta);
+    fetch(DATA("ciudad.json")).then((r) => r.json()).then(setCiudad);
     fetch(DATA("sol.json")).then((r) => r.json()).then(setSol);
-    fetch(DATA("heatmap_frente.json")).then((r) => r.json()).then(setHeatmap);
+    fetch(DATA("barrios.json")).then((r) => r.json()).then(setBarrios);
     fetch(DATA("avenidas.json")).then((r) => r.json()).then(setAvenidas);
     fetch(DATA("suelo_urbano.json")).then((r) => r.json()).then(setSuelo);
     if (import.meta.env.DEV) {
       window.__qaHover = (smp, x, y) => setHover(smp ? { smp, x, y } : null);
-      window.__qaPick = (smp) => elegirSmp(smp, null, null);
-      window.__qaComparar = (smp) => elegirSmp(smp, null, null, "comp");
+      window.__qaPick = (smp) => elegirSmpRef.current(smp, null, null);
+      window.__qaComparar = (smp) => elegirSmpRef.current(smp, null, null, "comp");
     }
   }, []);
+
+  // ── carga por viewport: heatmap + tiles de tejido de las comunas visibles
+  useEffect(() => {
+    if (!meta || !caja || caja.zoom < UMBRAL_DETALLE) return;
+    for (const nro of comunasEnCaja(caja.caja, meta)) {
+      if (!heatmaps[nro] && !pidiendo.current.has(`hm${nro}`)) {
+        pidiendo.current.add(`hm${nro}`);
+        fetch(DATA(`c${nro}/heatmap.json`)).then((r) => r.json())
+          .then((d) => setHeatmaps((h) => ({ ...h, [nro]: d })))
+          .catch(() => pidiendo.current.delete(`hm${nro}`));
+      }
+      const com = meta.comunas.find((c) => c.n === nro);
+      for (const q of cuadrantesEnCaja(caja.caja, com)) {
+        const k = `${nro}-q${q}`;
+        if (tejidos[k] || pidiendo.current.has(k)) continue;
+        pidiendo.current.add(k);
+        fetch(DATA(`c${nro}/tejido-q${q}.geojson`)).then((r) => r.json())
+          .then((d) => setTejidos((t) => {
+            const nuevo = { ...t, [k]: d };
+            ordenTiles.current = [...ordenTiles.current.filter((x) => x !== k), k];
+            // LRU: soltar los tiles más viejos que ya no están en el viewport
+            while (ordenTiles.current.length > MAX_TILES) {
+              const viejo = ordenTiles.current.shift();
+              delete nuevo[viejo];
+              pidiendo.current.delete(viejo);
+            }
+            return nuevo;
+          }))
+          .catch(() => pidiendo.current.delete(k));
+      }
+    }
+  }, [meta, caja, heatmaps, tejidos]);
 
   const rango = useMemo(() => {
     if (!sol) return null;
@@ -139,30 +186,28 @@ export default function App() {
     if (rango) setHoraIdx((h) => Math.min(rango[1], Math.max(rango[0], h)));
   }, [rango]);
 
+  // los percentiles de la rampa son CITYWIDE y fijos (viajan en comunas.json):
+  // la escala no se corre cuando entran comunas nuevas al viewport
   const calor = useMemo(() => {
-    if (!heatmap) return null;
-    const col = heatmap.alturas.indexOf(altura) * heatmap.fechas.length +
-                heatmap.fechas.indexOf(fecha);
+    if (!meta) return null;
+    const col = meta.alturas.indexOf(altura) * meta.fechas.length +
+                meta.fechas.indexOf(fecha);
     const valores = new Map(), dirs = new Map();
-    heatmap.smp.forEach((s, i) => {
-      valores.set(s, heatmap.horas[i][col]);
-      dirs.set(s, heatmap.dir[i]);
-    });
-    const orden = [...valores.values()].filter((v) => v >= 0).sort((a, b) => a - b);
-    const q = (p) => orden[Math.floor(p * (orden.length - 1))] ?? 0;
-    const p5 = q(0.05);
-    const p95 = Math.max(q(0.95), p5 + 1);
-    return { valores, dirs, p5, p95 };
-  }, [heatmap, altura, fecha]);
+    for (const hm of Object.values(heatmaps)) {
+      hm.smp.forEach((s, i) => {
+        valores.set(s, hm.horas[i][col]);
+        dirs.set(s, hm.dir[i]);
+      });
+    }
+    return { valores, dirs, col, p5: meta.p5[col], p95: meta.p95[col] };
+  }, [meta, heatmaps, altura, fecha]);
 
   async function elegirSmp(smp, etiqueta, nota, destino = "sel") {
     setMensaje(null);
     setCargandoSmp(true);
     setExpandida(false);
     try {
-      const r = await fetch(DATA(`smp/${smp}.json`));
-      if (!r.ok) throw new Error("sin datos");
-      const doc = await r.json();
+      const doc = await cargarDoc(smp, meta, packCache.current);
       const valor = { smp, etiqueta: etiqueta || doc.direcciones || `SMP ${smp}`, nota, doc };
       destino === "comp" ? setComp(valor) : setSel(valor);
     } catch {
@@ -173,6 +218,8 @@ export default function App() {
       setModoComparar(false);
     }
   }
+  const elegirSmpRef = useRef(elegirSmp);
+  elegirSmpRef.current = elegirSmp;
 
   function alElegir(smp, etiqueta, nota) {
     // el flujo de una parcela es sagrado: solo va a comparación si el modo
@@ -269,14 +316,16 @@ export default function App() {
             luz={luzActual} solDia={sol ? sol[fecha] : null}
             calor={calor} rampa={rampa} cfg={cfg}
             avenidas={avenidas} suelo={suelo}
+            meta={meta} ciudad={ciudad} barrios={barrios}
+            tejidos={tejidos} onCaja={setCaja}
             hoverSmp={hover?.smp || null} onHover={setHover}
             onPick={(smp) => alElegir(smp, null, null)}
             cine={!!dia} soleado={soleado} />
 
       <header className="cabecera">
         <h1>datasun</h1>
-        <span className="sub">análisis de asoleamiento · comuna 6 · buenos aires</span>
-        <Buscador indice={indice} onElegir={alElegir}
+        <span className="sub">análisis de asoleamiento · buenos aires</span>
+        <Buscador onElegir={alElegir}
                   onMensaje={(m) => { setMensaje(m); }} />
         {mensaje && <div className="mensaje" role="status">{mensaje}</div>}
         {modoComparar && (
@@ -408,7 +457,7 @@ export default function App() {
           El color de cada edificio son las horas de sol directo que recibe el frente
           de su parcela, calculadas contra el tejido real (huellas + alturas, BA Data
           ~2021) para la altura y estación elegidas. Tocá un edificio o buscá una
-          dirección para ver el detalle por cara y por piso. Piloto: Comuna 6.
+          dirección para ver el detalle por cara y por piso. Cobertura: CABA completa.
         </div>
       )}
       {popover === "ajustes" && (

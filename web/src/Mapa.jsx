@@ -5,10 +5,11 @@ import {
   LightingEffect,
   WebMercatorViewport,
 } from "@deck.gl/core";
+import { CollisionFilterExtension } from "@deck.gl/extensions";
 import { GeoJsonLayer, LineLayer, PathLayer, ScatterplotLayer, SolidPolygonLayer, TextLayer } from "@deck.gl/layers";
 import DeckGL from "@deck.gl/react";
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { DATA, GRIS_SIN_DATO, hexRgb, tonoSuelo } from "./util.js";
+import { GRIS_SIN_DATO, hexRgb, tonoSuelo } from "./util.js";
 
 // tonos base del suelo "susurro" (multiplicados por cfg.*Lum)
 const TONO_CALLE = "#141a24";
@@ -18,24 +19,25 @@ const TONO_VIA = "#0a0e14";
 // parques 1.2, calles 1.45, vías 1.7 (la vía gana donde cruza una calzada)
 const Z_PARQUE = 1.2, Z_CALLE = 1.45, Z_VIA = 1.7;
 
-// "Home": la ciudad llena el cuadro en diagonal, con el sol arriba.
-const VISTA_OPERATIVA = {
-  longitude: -58.4405, latitude: -34.6175,
-  zoom: 14.0, pitch: 60, bearing: -50,
-};
-const VISTA_INTRO = { ...VISTA_OPERATIVA, zoom: 13.2, pitch: 60, bearing: -62 };
-
 const REDUCIDO = matchMedia("(prefers-reduced-motion: reduce)").matches;
 const MOVIL = matchMedia("(max-width: 780px)").matches;
 const DEBIL = MOVIL && (navigator.deviceMemory || 8) < 4;
 const CON_SOMBRAS = new URLSearchParams(location.search).get("sombras") === "1";
 
-// suelo acotado al entorno de la trama (+3 km): más allá, el canvas queda
+// "Home": CABA entera en diagonal con pitch más bajo (el detalle 3D entra al
+// acercarse); la intro vuela desde un poco más lejos.
+const VISTA_CIUDAD = {
+  longitude: -58.4383, latitude: -34.601,
+  zoom: MOVIL ? 10.68 : 11.55, pitch: 45, bearing: -20,
+};
+const VISTA_INTRO = { ...VISTA_CIUDAD, zoom: VISTA_CIUDAD.zoom - 0.55, bearing: -32 };
+
+// suelo acotado al entorno de CABA (+3 km): más allá, el canvas queda
 // transparente y aparece el cielo — el sol (overlay bajo el canvas) asoma
 // recién detrás de la silueta; el velo del borde funde la transición
 const SUELO = [[
-  [-58.4745, -34.6455], [-58.4065, -34.6455],
-  [-58.4065, -34.5895], [-58.4745, -34.5895],
+  [-58.563, -34.732], [-58.302, -34.732],
+  [-58.302, -34.499], [-58.563, -34.499],
 ]];
 
 const ZONAS = [
@@ -55,9 +57,9 @@ function posCielo(lon, lat, az, elev, R) {
           R * Math.tan(rad(Math.max(elev, 0.5)))];
 }
 
-// semiejes aproximados de la comuna (m), para saber dónde termina el tejido
-const COMUNA_RX = 2100, COMUNA_RY = 1900;
-const COMUNA_CENTRO = [-58.4405, -34.6175];
+// semiejes aproximados de CABA (m), para saber dónde termina el tejido
+const COMUNA_RX = 9000, COMUNA_RY = 9900;
+const COMUNA_CENTRO = [-58.4383, -34.6156];
 
 /* Sol como overlay CSS, renderizado DEBAJO del canvas: el canvas de deck es
    transparente en el cielo, así que la ciudad dibujada lo ocluye — el disco
@@ -119,12 +121,30 @@ function VeloBorde({ vista }) {
 
 export default function Mapa({ smpSel, centro, compSmp, compCentro,
                                luz, solDia, calor, rampa, cfg,
-                               avenidas, suelo, hoverSmp, onHover, onPick,
+                               avenidas, suelo, meta, ciudad, barrios,
+                               tejidos, onCaja, hoverSmp, onHover, onPick,
                                cine = false, soleado = false }) {
-  const [vista, setVista] = useState(REDUCIDO || DEBIL ? VISTA_OPERATIVA : VISTA_INTRO);
-  const [tejido, setTejido] = useState(null);
+  const [vista, setVista] = useState(REDUCIDO || DEBIL ? VISTA_CIUDAD : VISTA_INTRO);
   const introHecha = useRef(REDUCIDO || DEBIL);
   const deckRef = useRef(null);
+  const timerCaja = useRef(null);
+
+  // caja del viewport alrededor del TARGET de cámara (no getBounds: a pitch
+  // alto los bounds incluyen el horizonte y cargarían la ciudad entera)
+  useEffect(() => {
+    clearTimeout(timerCaja.current);
+    timerCaja.current = setTimeout(() => {
+      const mpp = (156543.03392 * Math.cos(rad(vista.latitude))) / 2 ** vista.zoom;
+      const medioW = (window.innerWidth / 2) * mpp * 1.15;
+      const medioH = (window.innerHeight / 2) * mpp * (1 + vista.pitch / 80);
+      const dLon = medioW / (111320 * Math.cos(rad(vista.latitude)));
+      const dLat = medioH / 111320;
+      onCaja?.({ zoom: vista.zoom,
+                 caja: [vista.longitude - dLon, vista.latitude - dLat,
+                        vista.longitude + dLon, vista.latitude + dLat] });
+    }, 250);
+    return () => clearTimeout(timerCaja.current);
+  }, [vista.longitude, vista.latitude, vista.zoom, vista.pitch]);
 
   useEffect(() => {
     const t = setInterval(() => {
@@ -140,26 +160,20 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
     return () => clearInterval(t);
   }, []);
 
+  // la intro arranca cuando el agregado de la ciudad (primera pintura) llegó
   useEffect(() => {
-    fetch(DATA("tejido_comuna6.geojson"))
-      .then((r) => r.json())
-      .then(setTejido)
-      .catch((e) => console.error("tejido no cargó:", e));
-  }, []);
-
-  useEffect(() => {
-    if (introHecha.current || !tejido) return;
+    if (introHecha.current || !ciudad) return;
     introHecha.current = true;
     const t = setTimeout(() => {
       setVista({
-        ...VISTA_OPERATIVA,
+        ...VISTA_CIUDAD,
         transitionDuration: MOVIL ? 1300 : 2500,
         transitionInterpolator: new FlyToInterpolator({ curve: 1.05 }),
         transitionEasing: (x) => 1 - Math.pow(1 - x, 3),
       });
     }, 400);
     return () => clearTimeout(t);
-  }, [tejido]);
+  }, [ciudad]);
 
   useEffect(() => {
     if (centro) {
@@ -253,17 +267,45 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
   // contorno de la parcela en modo día: anillos del techo de cada prisma del
   // SMP — el fill conserva el color de heatmap y la selección se lee por línea
   const contorno = useMemo(() => {
-    if (!cine || !smpSel || !tejido) return null;
+    if (!cine || !smpSel || !tejidos) return null;
     const anillos = [];
-    for (const f of tejido.features) {
-      if (f.properties.smp !== smpSel) continue;
-      const z = (f.properties.altura || 3) + 1.5;
-      const polys = f.geometry.type === "Polygon"
-        ? [f.geometry.coordinates] : f.geometry.coordinates;
-      polys.forEach((p) => anillos.push(p[0].map(([x, y]) => [x, y, z])));
+    for (const tj of Object.values(tejidos)) {
+      for (const f of tj.features) {
+        if (f.properties.smp !== smpSel) continue;
+        const z = (f.properties.altura || 3) + 1.5;
+        const polys = f.geometry.type === "Polygon"
+          ? [f.geometry.coordinates] : f.geometry.coordinates;
+        polys.forEach((p) => anillos.push(p[0].map(([x, y]) => [x, y, z])));
+      }
     }
     return anillos.length ? anillos : null;
-  }, [cine, smpSel, tejido]);
+  }, [cine, smpSel, tejidos]);
+
+  // manzana del agregado → tile de tejido que la cubre: cuando ese tile está
+  // cargado la manzana se oculta (el 3D fino la reemplaza sin que el prisma
+  // agregado asome por los patios)
+  const tileDeMz = useMemo(() => {
+    if (!ciudad || !meta) return null;
+    const bboxDe = new Map(meta.comunas.map((c) => [c.n, c.bbox]));
+    const m = new Map();
+    for (const mz of ciudad.manzanas) {
+      // la comuna viaja explícita en la manzana (la sección no alcanza:
+      // cruza límites de comuna)
+      const bb = bboxDe.get(mz.c);
+      if (!bb) continue;
+      const [p0x, p0y] = mz.p[0];
+      const q = (p0x >= (bb[0] + bb[2]) / 2 ? 1 : 0) +
+                (p0y >= (bb[1] + bb[3]) / 2 ? 2 : 0);
+      m.set(mz, `${mz.c}-q${q}`); // clave = objeto: mz.m puede repetirse entre comunas
+    }
+    return m;
+  }, [ciudad, meta]);
+
+  const agregadoData = useMemo(() => {
+    if (!ciudad) return null;
+    if (!tileDeMz || !tejidos) return ciudad.manzanas;
+    return ciudad.manzanas.filter((mz) => !tejidos[tileDeMz.get(mz)]);
+  }, [ciudad, tileDeMz, tejidos]);
 
   const lonC = Math.round(vista.longitude * 400) / 400;
   const latC = Math.round(vista.latitude * 400) / 400;
@@ -295,7 +337,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
 
   const avPrincipales = useMemo(() => {
     if (!avenidas) return null;
-    const c = [VISTA_OPERATIVA.longitude, VISTA_OPERATIVA.latitude];
+    const c = [VISTA_CIUDAD.longitude, VISTA_CIUDAD.latitude];
     const d2 = (p) => (p[0] - c[0]) ** 2 + (p[1] - c[1]) ** 2;
     return AVENIDAS_PRINCIPALES.flatMap((nombre) => {
       const cand = avenidas.filter((a) => a.n.includes(nombre))
@@ -329,7 +371,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
       smpSel && centro && { p: centro, c: [255, 244, 220, 235] },
       compSmp && compCentro && { p: compCentro, c: [168, 205, 255, 235] },
     ].filter(Boolean);
-    const zoomBajo = vista.zoom < 14.8;
+    const zoomBajo = vista.zoom >= 13.2 && vista.zoom < 14.8;
     return [
       new SolidPolygonLayer({
         id: "suelo", data: SUELO, getPolygon: (d) => d,
@@ -361,9 +403,27 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         getColor: tonoSuelo(TONO_VIA, cfg.viaLum),
         updateTriggers: { getColor: [cfg.viaLum] },
       }),
-      tejido && new GeoJsonLayer({
-        id: "tejido",
-        data: tejido,
+      // ── LOD ciudad: agregado por manzana, siempre presente debajo del
+      // detalle (las manzanas cuyo tile 3D está cargado se filtran)
+      agregadoData && calor && new SolidPolygonLayer({
+        id: "agregado",
+        data: agregadoData,
+        getPolygon: (d) => d.p,
+        extruded: true,
+        getElevation: (d) => d.h,
+        getFillColor: (d) => {
+          const v = d.v[calor.col];
+          if (v < 0) return [GRIS_SIN_DATO[0], GRIS_SIN_DATO[1], GRIS_SIN_DATO[2], 255];
+          const c = rampa((v - calor.p5) / (calor.p95 - calor.p5));
+          return [c[0], c[1], c[2], 255];
+        },
+        updateTriggers: { getFillColor: [calor, rampa] },
+        material: { ambient: 0.62, diffuse: 0.5, shininess: 22, specularColor: [10, 10, 10] },
+      }),
+      // ── detalle: un GeoJsonLayer por tile de tejido cargado
+      ...Object.entries(tejidos || {}).map(([k, data]) => new GeoJsonLayer({
+        id: `tejido-${k}`,
+        data,
         extruded: true,
         getElevation: (f) => f.properties.altura,
         getFillColor: colorDe,
@@ -373,7 +433,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         onHover: (info) => onHover(info.object
           ? { smp: info.object.properties.smp, x: info.x, y: info.y } : null),
         onClick: (info) => info.object && onPick(info.object.properties.smp),
-      }),
+      })),
       // ── contorno cine: sub-trazo oscuro (legible sobre cualquier color de
       // rampa) + línea ámbar; el glow se enciende mientras hay sol directo y
       // decae al salir del intervalo — cuenta la historia sin tapar el color
@@ -401,11 +461,14 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         transitions: { getWidth: 500, getColor: 500 },
         updateTriggers: { getWidth: [soleado], getColor: [soleado] },
       }),
+      // el arco solar está dimensionado para escala comuna: a vista ciudad se
+      // esconde (el sol overlay ya cuenta la posición)
       arco && new ScatterplotLayer({
         id: "arco-sol", data: arco.puntos, getPosition: (d) => d,
         radiusUnits: "pixels", getRadius: 1.8,
         getFillColor: [255, 214, 140, 150],
         parameters: { depthCompare: "always" },
+        visible: vista.zoom >= 12.5,
       }),
       arco && new TextLayer({
         id: "arco-extremos", data: arco.extremos,
@@ -415,6 +478,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         fontSettings: { sdf: true }, outlineColor: [10, 14, 20, 200], outlineWidth: 2,
         getPixelOffset: [0, -10],
         parameters: { depthCompare: "always" },
+        visible: vista.zoom >= 12.5,
       }),
       // referencias internas: susurro (chicas, ~0.35 de opacidad)
       zoomBajo && new LineLayer({
@@ -436,6 +500,22 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         fontFamily: "Inter, sans-serif", fontWeight: 500, characterSet: "auto",
         fontSettings: { sdf: true }, outlineColor: [10, 14, 20, 160], outlineWidth: 2,
       }),
+      // etiquetas por escala: barrios a zoom ciudad (los grandes ganan si
+      // colisionan), avenidas a zoom medio
+      new TextLayer({
+        id: "barrios",
+        data: barrios || [],
+        getPosition: (d) => [d.p[0], d.p[1], 60],
+        getText: (d) => d.n,
+        getSize: 10.5, getColor: [212, 217, 228, 168],
+        fontFamily: "Inter, sans-serif", fontWeight: 500, characterSet: "auto",
+        fontSettings: { sdf: true }, outlineColor: [10, 14, 20, 200], outlineWidth: 2,
+        parameters: { depthCompare: "always" },
+        extensions: [new CollisionFilterExtension()],
+        collisionTestProps: { sizeScale: 2.4 },
+        getCollisionPriority: (d) => d.a || 0,
+        visible: vista.zoom < 13.2,
+      }),
       new TextLayer({
         id: "avenidas",
         data: (vista.zoom < 14.3 ? avPrincipales : avenidas) || [],
@@ -446,7 +526,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         characterSet: "auto", fontSettings: { sdf: true },
         outlineColor: [10, 14, 20, 190], outlineWidth: 2,
         updateTriggers: { getSize: [vista.zoom < 14.3], getColor: [vista.zoom < 14.3] },
-        visible: vista.zoom < 16,
+        visible: vista.zoom >= 12.8 && vista.zoom < 16,
       }),
       pins.length && new LineLayer({
         id: "pin-linea", data: pins,
@@ -463,17 +543,23 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         parameters: { depthCompare: "always" },
       }),
     ].filter(Boolean);
-  }, [tejido, smpSel, compSmp, soleado, contorno, cine, hoverSmp, calor, rampa, arco, avenidas,
+  }, [tejidos, agregadoData, barrios, smpSel, compSmp, soleado, contorno, cine,
+      hoverSmp, calor, rampa, arco, avenidas,
       avPrincipales, sueloZ, cfg.calleLum, cfg.parqueLum, cfg.viaLum,
-      centro, compCentro, vista.zoom < 14.8, vista.zoom < 14.3, vista.zoom < 16,
-      vista.zoom > 15.2]);
+      centro, compCentro, vista.zoom >= 13.2 && vista.zoom < 14.8,
+      vista.zoom < 14.3, vista.zoom < 13.2, vista.zoom >= 12.5,
+      vista.zoom >= 12.8 && vista.zoom < 16, vista.zoom > 15.2]);
 
   // Niebla en DOS niveles: la densa (nieblaDensidad) se concentra en la banda
   // alta —suelo lejano y costura del mundo—, y sobre la franja del tejido cae
   // rápido a un velo reducido (nieblaTejido) para que el heatmap conserve el
   // punch emisivo: los oscuros siguen oscuros.
   const nieblaEstilo = useMemo(() => {
-    const d = cfg.nieblaDensidad, dt = cfg.nieblaTejido ?? 0.35, a = cfg.nieblaAlcance;
+    // a vista ciudad la niebla densa taparía el norte de la ciudad: se atenúa
+    const fCiudad = vista.zoom < 12.5 ? 0.55 : 1;
+    const d = cfg.nieblaDensidad * fCiudad,
+          dt = (cfg.nieblaTejido ?? 0.35) * fCiudad,
+          a = cfg.nieblaAlcance;
     const paso = (f, alpha) =>
       `rgba(10,14,20,${alpha.toFixed(3)}) ${Math.round(f * a * 100)}%`;
     return {
@@ -483,7 +569,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         `transparent ${Math.round(a * 100)}%`,
       ].join(", ")})`,
     };
-  }, [cfg.nieblaDensidad, cfg.nieblaTejido, cfg.nieblaAlcance]);
+  }, [cfg.nieblaDensidad, cfg.nieblaTejido, cfg.nieblaAlcance, vista.zoom < 12.5]);
 
   // cielo del modo día: keyframes amanecer/atardecer (horizonte cálido) ↔
   // mediodía (azul más claro arriba) interpolados por `momento`; con el sol
@@ -512,7 +598,7 @@ export default function Mapa({ smpSel, centro, compSmp, compCentro,
         ref={deckRef}
         viewState={vista}
         onViewStateChange={(e) => setVista(e.viewState)}
-        controller={{ touchRotate: true, maxPitch: 66 }}
+        controller={{ touchRotate: true, maxPitch: 66, minZoom: 10.2 }}
         layers={capas}
         effects={efectos}
         onError={(e) => console.error("deck error:", e)}

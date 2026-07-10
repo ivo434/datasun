@@ -1,6 +1,65 @@
 // Rutas de datos con base configurable (GitHub Pages sirve bajo subdirectorio)
 export const DATA = (ruta) => `${import.meta.env.BASE_URL}data/${ruta}`;
 
+// ── Capa de datos particionada por comuna ────────────────────────────────
+// Gemelo EXACTO de fnv1a() en scripts/export_frontend.py (los SMP son ASCII,
+// charCode == byte). Si se toca uno hay que tocar el otro.
+export function fnv1a(s) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < s.length; i++) {
+    h = Math.imul(h ^ s.charCodeAt(i), 16777619) >>> 0;
+  }
+  return h;
+}
+
+// SMP → comunas candidatas, vía la sección (primer segmento). OJO: las
+// secciones catastrales NO respetan límites de comuna (la 6 tiene parcelas
+// en la Comuna 1 y en la 4), así que es una LISTA y hay que probar packs.
+export const comunasDeSmp = (smp, meta) =>
+  meta?.secciones?.[smp.split("-")[0]] || [];
+
+// Documento de una parcela: para cada comuna candidata resuelve shard → pack
+// y devuelve el doc del primero que lo tenga. `cache` es un Map compartido de
+// promesas de packs (una descarga por shard).
+export async function cargarDoc(smp, meta, cache) {
+  const candidatas = comunasDeSmp(smp, meta);
+  if (!candidatas.length) throw new Error(`sección desconocida para ${smp}`);
+  for (const nro of candidatas) {
+    const com = meta.comunas.find((c) => c.n === nro);
+    if (!com) continue;
+    const shard = (fnv1a(smp) % com.S).toString(16).padStart(3, "0");
+    const ruta = `c${nro}/p/${shard}.json`;
+    if (!cache.has(ruta)) {
+      cache.set(ruta, fetch(DATA(ruta)).then((r) => {
+        if (!r.ok) throw new Error("pack no encontrado");
+        return r.json();
+      }).catch((e) => { cache.delete(ruta); throw e; }));
+    }
+    const pack = await cache.get(ruta).catch(() => null);
+    if (pack && pack[smp]) return pack[smp];
+  }
+  throw new Error("sin datos");
+}
+
+// ¿Qué comunas toca una caja [w,s,e,n] en 4326? (para carga por viewport)
+export function comunasEnCaja(caja, meta) {
+  if (!meta) return [];
+  const [w, s, e, n] = caja;
+  return meta.comunas
+    .filter(({ bbox: [bw, bs, be, bn] }) => bw <= e && be >= w && bs <= n && bn >= s)
+    .map((c) => c.n);
+}
+
+// Cuadrantes (0..3) del bbox de una comuna que toca la caja del viewport.
+export function cuadrantesEnCaja(caja, com) {
+  const [w, s, e, n] = caja;
+  const [bw, bs, be, bn] = com.bbox;
+  const cx = (bw + be) / 2, cy = (bs + bn) / 2;
+  const tiles = [[bw, bs, cx, cy], [cx, bs, be, cy], [bw, cy, cx, bn], [cx, cy, be, bn]];
+  return tiles.flatMap(([tw, ts, te, tn], q) =>
+    tw <= e && te >= w && ts <= n && tn >= s ? [q] : []);
+}
+
 // Misma normalización de nombre de calle que palabras_calle() en fase0.py:
 // mayúsculas, sin puntuación ni acentos, palabras ordenadas.
 // "GAONA AV." (USIG) ≡ "AV. GAONA" (frentes-parcelas).
